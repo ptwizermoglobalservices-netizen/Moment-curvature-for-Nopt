@@ -3,21 +3,9 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
-# ==========================================================
-# STREAMLIT PAGE SETUP
-# ==========================================================
-
-st.set_page_config(
-    page_title="Moment-Curvature Analysis",
-    layout="wide"
-)
+st.set_page_config(page_title="Moment-Curvature Analysis", layout="wide")
 
 st.title("Moment–Curvature Analysis of RC Section")
-
-st.write("""
-This app performs curvature-controlled moment–curvature analysis
-for a rectangular reinforced concrete section under different axial loads.
-""")
 
 # ==========================================================
 # USER INPUTS
@@ -25,53 +13,36 @@ for a rectangular reinforced concrete section under different axial loads.
 
 st.sidebar.header("Section Inputs")
 
-b = st.sidebar.number_input("Section width b (mm)", value=300.0, min_value=1.0)
-H = st.sidebar.number_input("Section height H (mm)", value=500.0, min_value=1.0)
+b = st.sidebar.number_input("Section width b (mm)", value=300.0)
+H = st.sidebar.number_input("Section height H (mm)", value=500.0)
+As = st.sidebar.number_input("Tension reinforcement As (mm²)", value=1200.0)
+Asp = st.sidebar.number_input("Compression reinforcement As' (mm²)", value=600.0)
 
-As = st.sidebar.number_input("Tension reinforcement As (mm²)", value=2000.0, min_value=0.0)
-Asp = st.sidebar.number_input("Compression reinforcement As' (mm²)", value=1000.0, min_value=0.0)
+st.sidebar.header("Material Inputs")
 
-cover = st.sidebar.number_input("Concrete cover (mm)", value=50.0, min_value=0.0)
+fck = st.sidebar.number_input("Concrete strength fck (MPa)", value=30.0)
+fyk = st.sidebar.number_input("Steel yield strength fyk (MPa)", value=450.0)
+Es = st.sidebar.number_input("Steel modulus Es (MPa)", value=200000.0)
 
-st.sidebar.header("Material Properties")
+ecu = st.sidebar.number_input("Concrete ultimate strain εcu", value=0.01, format="%.5f")
+esu = st.sidebar.number_input("Steel ultimate strain εsu", value=0.05, format="%.5f")
 
-fck = st.sidebar.number_input("Concrete strength fck (MPa)", value=30.0, min_value=1.0)
-alpha_cc = st.sidebar.number_input("alpha_cc", value=0.85, min_value=0.0)
-gamma_c = st.sidebar.number_input("gamma_c", value=1.5, min_value=0.1)
+cover = st.sidebar.number_input("Cover (mm)", value=50.0)
 
-fyk = st.sidebar.number_input("Steel yield strength fyk (MPa)", value=450.0, min_value=1.0)
-gamma_s = st.sidebar.number_input("gamma_s", value=1.15, min_value=0.1)
-Es = st.sidebar.number_input("Steel modulus Es (MPa)", value=200000.0, min_value=1.0)
-
-ecu = st.sidebar.number_input(
-    "Ultimate concrete strain εcu",
-    value=0.0035,
-    format="%.5f"
-)
-
-st.sidebar.header("Analysis Settings")
-
-max_phi = st.sidebar.number_input(
-    "Maximum curvature φmax (1/mm)",
-    value=5e-5,
-    format="%.8f"
-)
-
-num_steps = st.sidebar.number_input(
-    "Number of curvature steps",
-    value=600,
-    min_value=50,
-    step=50
-)
-
-run_analysis = st.sidebar.button("Run Analysis")
+phi_max = st.sidebar.number_input("Maximum curvature", value=3e-4, format="%.6f")
+n_points = st.sidebar.number_input("Number of curvature points", value=1000, step=100)
 
 # ==========================================================
-# DERIVED VALUES
+# MATERIAL PROPERTIES
 # ==========================================================
 
+alpha_cc = 0.85
+gamma_c = 1.5
 fcd = alpha_cc * fck / gamma_c
+
+gamma_s = 1.15
 fyd = fyk / gamma_s
+
 ey = fyd / Es
 
 delta = cover
@@ -102,41 +73,54 @@ def concrete_stress(eps):
         return 0.0
 
 
-# ==========================================================
-# XI AND LAMBDA FUNCTIONS
-# ==========================================================
-
 def xi_function(eps_top, n=300):
+    if eps_top <= 0:
+        return 0.0
+
     eps = np.linspace(0.0, eps_top, n)
     sigma = np.array([concrete_stress(e) for e in eps])
-
     area = np.trapezoid(sigma, eps)
-
-    if fcd * eps_top == 0:
-        return 0.0
 
     return area / (fcd * eps_top)
 
 
 def lambda_function(eps_top, xi, n=300):
+    if eps_top <= 0 or xi <= 0:
+        return 0.0
+
     eps = np.linspace(0.0, eps_top, n)
     sigma = np.array([concrete_stress(e) for e in eps])
 
-    integral = np.trapezoid(
-        sigma * (eps_top - eps),
-        eps
-    )
+    integral = np.trapezoid(sigma * (eps_top - eps), eps)
 
-    denominator = eps_top**2 * fcd * xi
-
-    if denominator == 0:
-        return 0.0
-
-    return integral / denominator
+    return integral / (eps_top**2 * fcd * xi)
 
 
 # ==========================================================
-# EQUILIBRIUM FUNCTIONS
+# BALANCED FAILURE AND Nopt
+# ==========================================================
+
+X_bal = ecu * d / (ecu + esu)
+xi_bal = xi_function(ecu)
+
+eps_sp_bal = ecu * (X_bal - delta) / X_bal
+eps_s_bal = ecu * (X_bal - d) / X_bal
+
+Cc_bal = b * X_bal * fcd * xi_bal
+Fsp_bal = steel_stress(eps_sp_bal) * Asp
+Fs_bal = steel_stress(eps_s_bal) * As
+
+Nopt = Cc_bal + Fsp_bal + Fs_bal
+
+N_values = {
+    "N = 0": 0.0,
+    "N = 0.8 Nopt": 0.8 * Nopt,
+    "N = Nopt": Nopt,
+    "N = 1.2 Nopt": 1.2 * Nopt
+}
+
+# ==========================================================
+# ANALYSIS FUNCTIONS
 # ==========================================================
 
 def axial_equilibrium(Xc, phi, N0):
@@ -162,7 +146,7 @@ def axial_equilibrium(Xc, phi, N0):
 
 def solve_Xc(phi, N0, tol=1e-3, max_iter=100):
     X_low = 1e-6
-    X_high = H
+    X_high = min(H, ecu / phi)
 
     f_low = axial_equilibrium(X_low, phi, N0)
     f_high = axial_equilibrium(X_high, phi, N0)
@@ -194,10 +178,6 @@ def solve_Xc(phi, N0, tol=1e-3, max_iter=100):
     return X_mid
 
 
-# ==========================================================
-# MOMENT-CURVATURE ANALYSIS
-# ==========================================================
-
 def moment_curvature_analysis(N0):
     results = []
 
@@ -205,13 +185,14 @@ def moment_curvature_analysis(N0):
         "Curvature (1/mm)": 0.0,
         "Moment (kN.m)": 0.0,
         "Xc (mm)": np.nan,
-        "eps_top": 0.0
+        "eps_top": 0.0,
+        "eps_s": 0.0,
+        "eps_sp": 0.0
     })
 
-    phi_values = np.linspace(1e-8, max_phi, int(num_steps))
+    phi_values = np.linspace(1e-8, phi_max, int(n_points))
 
     for phi in phi_values:
-
         Xc = solve_Xc(phi, N0)
 
         if Xc is None:
@@ -236,60 +217,58 @@ def moment_curvature_analysis(N0):
         Fs = steel_stress(eps_s) * As
         Ms = Fs * (Yg - d)
 
-        M = Mc + Msp + Ms
-        M = M / 1e6
+        if abs(eps_s) >= esu or abs(eps_sp) >= esu:
+            break
+
+        M = (Mc + Msp + Ms) / 1e6
 
         results.append({
             "Curvature (1/mm)": phi,
             "Moment (kN.m)": M,
             "Xc (mm)": Xc,
-            "eps_top": eps_top
+            "eps_top": eps_top,
+            "eps_s": eps_s,
+            "eps_sp": eps_sp
         })
 
     return pd.DataFrame(results)
 
 
 # ==========================================================
-# RUN STREAMLIT APP
+# RUN BUTTON
 # ==========================================================
 
-if run_analysis:
+if st.button("Run Analysis"):
 
-    if cover >= H:
-        st.error("Cover must be smaller than section height H.")
-        st.stop()
+    st.subheader("Balanced Section Values")
 
-    X_bal = ecu * d / (ecu + ey)
-    xi_bal = xi_function(ecu)
+    col1, col2, col3 = st.columns(3)
 
-    Nopt = b * X_bal * fcd * xi_bal
-
-    N_values = {
-        "N = 0": 0.0,
-        "N = 0.8 Nopt": 0.8 * Nopt,
-        "N = Nopt": Nopt,
-        "N = 1.2 Nopt": 1.2 * Nopt
-    }
-
-    st.subheader("Calculated Section Parameters")
-
-    col1, col2, col3, col4 = st.columns(4)
-
-    col1.metric("fcd", f"{fcd:.2f} MPa")
-    col2.metric("fyd", f"{fyd:.2f} MPa")
-    col3.metric("Yield strain εy", f"{ey:.6f}")
-    col4.metric("Nopt", f"{Nopt/1000:.2f} kN")
-
-    st.write(f"Balanced neutral axis depth Xbal = **{X_bal:.2f} mm**")
-    st.write(f"ξ at balanced strain = **{xi_bal:.4f}**")
+    col1.metric("Balanced neutral axis X_bal", f"{X_bal:.3f} mm")
+    col2.metric("ξ_bal", f"{xi_bal:.4f}")
+    col3.metric("Nopt", f"{Nopt / 1000:.3f} kN")
 
     all_results = {}
+    final_rows = []
 
     fig, ax = plt.subplots(figsize=(9, 6))
 
     for label, N0 in N_values.items():
         df = moment_curvature_analysis(N0)
         all_results[label] = df
+
+        last = df.iloc[-1]
+
+        final_rows.append({
+            "Axial load case": label,
+            "N0 (kN)": N0 / 1000,
+            "Final curvature (1/mm)": last["Curvature (1/mm)"],
+            "Final moment (kN.m)": last["Moment (kN.m)"],
+            "Final concrete strain": last["eps_top"],
+            "Final tension steel strain": last["eps_s"],
+            "Final compression steel strain": last["eps_sp"],
+            "Final Xc (mm)": last["Xc (mm)"]
+        })
 
         ax.plot(
             df["Curvature (1/mm)"],
@@ -305,23 +284,20 @@ if run_analysis:
 
     st.pyplot(fig)
 
-    st.subheader("Analysis Results")
+    st.subheader("Final Strain Values")
+    final_df = pd.DataFrame(final_rows)
+    st.dataframe(final_df, use_container_width=True)
 
-    selected_case = st.selectbox(
-        "Select axial load case to view table",
-        list(all_results.keys())
-    )
+    st.subheader("Detailed Results")
 
-    st.dataframe(all_results[selected_case])
+    selected_case = st.selectbox("Select axial load case", list(all_results.keys()))
+    st.dataframe(all_results[selected_case], use_container_width=True)
 
     csv = all_results[selected_case].to_csv(index=False)
 
     st.download_button(
         label="Download selected results as CSV",
         data=csv,
-        file_name=f"{selected_case.replace(' ', '_')}_moment_curvature.csv",
+        file_name=f"{selected_case.replace(' ', '_').replace('=', '')}_results.csv",
         mime="text/csv"
     )
-
-else:
-    st.info("Enter section details in the sidebar and click **Run Analysis**.")
